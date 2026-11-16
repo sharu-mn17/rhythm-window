@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>32-Bit RGB Rhythm Light Studio</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #040406;
+      color: #fff;
+      font-family: system-ui, -apple-system, sans-serif;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    #controls {
+      position: fixed;
+      bottom: 16px;
+      z-index: 10;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      background: rgba(12, 12, 16, 0.82);
+      padding: 8px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      backdrop-filter: blur(14px);
+      transition: opacity 0.4s ease;
+      max-width: 95vw;
+    }
+    body.hide-ui #controls {
+      opacity: 0;
+      pointer-events: none;
+    }
+    /* Compact UI adjustments when window is resized small */
+    body.compact-mode #controls {
+      bottom: 10px;
+      padding: 6px 10px;
+      gap: 5px;
+      border-radius: 16px;
+    }
+    body.compact-mode .hide-in-mini {
+      display: none !important;
+    }
+    button, select {
+      background: rgba(255, 255, 255, 0.11);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      padding: 6px 11px;
+      border-radius: 999px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+      outline: none;
+      transition: background 0.2s, transform 0.1s;
+    }
+    button:hover, select:hover { background: rgba(255, 255, 255, 0.24); }
+    button:active { transform: scale(0.96); }
+    select option {
+      background: #14141a;
+      color: #fff;
+    }
+    .slider-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      padding: 5px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.88);
+    }
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 60px;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.25);
+      border-radius: 999px;
+      cursor: pointer;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 8px rgba(255, 255, 255, 0.8);
+      cursor: pointer;
+    }
+    canvas {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      width: 100vw;
+      height: 75vh;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="bars"></canvas>
+
+  <div id="controls">
+    <button onclick="startMic()">🎤 Mic</button>
+    <button onclick="startSystemAudio()">🔊 Audio</button>
+    <button onclick="openMiniWidget()" title="Pop out into bottom-left corner widget">🪟 Mini</button>
+
+    <button onclick="cycleTheme()" title="Shortcut: C">🎨 Mode</button>
+    <select id="themeSelect" class="hide-in-mini" onchange="selectTheme(this.value)">
+      <option value="0">Rainbow Cycle</option>
+      <option value="1">Cyber Neon</option>
+      <option value="2">Classic VU Meter</option>
+      <option value="3">Bass Strobe / Ambient</option>
+    </select>
+
+    <select id="styleSelect" class="hide-in-mini" onchange="selectStyle(this.value)">
+      <option value="led">Style: LED Blocks</option>
+      <option value="solid">Style: Smooth Bars</option>
+      <option value="ambient">Style: Ambient Glow</option>
+    </select>
+
+    <div class="slider-group hide-in-mini">
+      <span>🎚️ Sens</span>
+      <input type="range" min="0.4" max="2.5" step="0.1" value="1.0" oninput="sensitivity = parseFloat(this.value)">
+    </div>
+
+    <div class="slider-group hide-in-mini">
+      <span>☀️ Glow</span>
+      <input type="range" min="0" max="1.6" step="0.1" value="1.0" oninput="glowBrightness = parseFloat(this.value)">
+    </div>
+
+    <button onclick="toggleMirror()" id="mirrorBtn" class="hide-in-mini">↔ Mirror: ON</button>
+    <button onclick="toggleFull()" class="hide-in-mini">⛶ Full</button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('bars');
+    const ctx = canvas.getContext('2d');
+    let audioCtx, analyser, dataArray, animId;
+    let mirrorMode = true;
+    let currentStream = null;
+    let wakeLock = null;
+
+    let sensitivity = 1.0;
+    let glowBrightness = 1.0;
+    let activeBarCount = 32;
+
+    const peaks = new Array(32).fill(0);
+    const peakHoldTimers = new Array(32).fill(0);
+    let rollingMax = 155;
+    let strobeFlash = 0;
+    let prevBass = 0;
+
+    const themes = ['Rainbow Cycle', 'Cyber Neon', 'Classic VU Meter', 'Bass Strobe / Ambient'];
+    let themeIndex = 0;
+    let templateStyle = 'led';
+
+    // Dynamically adjust bar count & UI density based on current window width
+    function resize() {
+      canvas.width = window.innerWidth;
+      const isCompact = window.innerWidth < 520;
+      document.body.classList.toggle('compact-mode', isCompact);
+
+      // Use taller bar area in compact mini-window, standard height in fullscreen
+      canvas.height = isCompact ? window.innerHeight * 0.85 : window.innerHeight * 0.65;
+
+      // Scale bar count smoothly from 8 bars (tiny widget) up to 32 bars (full screen)
+      const computedBars = Math.floor(window.innerWidth / 26);
+      const clamped = Math.max(8, Math.min(32, computedBars));
+      // Keep even number so Mirror Mode stays symmetrical
+      activeBarCount = clamped % 2 === 0 ? clamped : clamped - 1;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Pop out into a compact bottom-left floating window (like a mini media player)
+    async function openMiniWidget() {
+      const w = 310;
+      const h = 300;
+      const left = 16;
+      const top = window.screen.availHeight - h - 16;
+
+      // Try Always-On-Top Document Picture-in-Picture first (Chrome/Edge)
+      if ('documentPictureInPicture' in window) {
+        try {
+          const pipWindow = await window.documentPictureInPicture.requestWindow({
+            width: w,
+            height: h
+          });
+          // Copy styles & move canvas/controls seamlessly into the always-on-top mini window
+          [...document.styleSheets].forEach(sheet => {
+            try {
+              const style = pipWindow.document.createElement('style');
+              style.textContent = [...sheet.cssRules].map(r => r.cssText).join('');
+              pipWindow.document.head.appendChild(style);
+            } catch (_) {}
+          });
+          pipWindow.document.body.append(canvas, document.getElementById('controls'));
+
+          const syncPipSize = () => {
+            canvas.width = pipWindow.innerWidth;
+            canvas.height = pipWindow.innerHeight * 0.85;
+            pipWindow.document.body.classList.add('compact-mode');
+            const computed = Math.floor(pipWindow.innerWidth / 26);
+            const clamped = Math.max(8, Math.min(32, computed));
+            activeBarCount = clamped % 2 === 0 ? clamped : clamped - 1;
+          };
+          pipWindow.addEventListener('resize', syncPipSize);
+          syncPipSize();
+
+          // Mirror background glow into the PiP window body
+          pipWindow._isPip = true;
+          window._pipBody = pipWindow.document.body;
+
+          pipWindow.addEventListener('pagehide', () => {
+            window._pipBody = null;
+            document.body.append(canvas, document.getElementById('controls'));
+            resize();
+          });
+          return;
+        } catch (_) {}
+      }
+
+      // Fallback: standard compact bottom-left popup window
+      window.open(
+        window.location.href,
+        'RhythmMiniWidget',
+        `width=${w},height=${h},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no`
+      );
+    }
+
+    let uiTimer;
+    function showUI() {
+      document.body.classList.remove('hide-ui');
+      if (window._pipBody) window._pipBody.classList.remove('hide-ui');
+      clearTimeout(uiTimer);
+      uiTimer = setTimeout(() => {
+        if (audioCtx) {
+          document.body.classList.add('hide-ui');
+          if (window._pipBody) window._pipBody.classList.add('hide-ui');
+        }
+      }, 2800);
+    }
+    window.addEventListener('mousemove', showUI);
+    window.addEventListener('click', showUI);
+    window.addEventListener('input', showUI);
+
+    window.addEventListener('keydown', (e) => {
+      const k = e.key.toLowerCase();
+      if (k === 'f') toggleFull();
+      if (k === 'm') toggleMirror();
+      if (k === 'c') cycleTheme();
+      if (k === 's') cycleStyle();
+    });
+
+    function toggleMirror() {
+      mirrorMode = !mirrorMode;
+      document.getElementById('mirrorBtn').textContent = `↔ Mirror: ${mirrorMode ? 'ON' : 'OFF'}`;
+    }
+
+    function cycleTheme() {
+      themeIndex = (themeIndex + 1) % themes.length;
+      document.getElementById('themeSelect').value = String(themeIndex);
+    }
+
+    function selectTheme(val) { themeIndex = Number(val); }
+    function selectStyle(val) { templateStyle = val; }
+
+    function cycleStyle() {
+      const order = ['led', 'solid', 'ambient'];
+      const next = order[(order.indexOf(templateStyle) + 1) % order.length];
+      templateStyle = next;
+      document.getElementById('styleSelect').value = next;
+    }
+
+    async function keepScreenAwake() {
+      try {
+        if ('wakeLock' in navigator && !wakeLock) {
+          wakeLock = await navigator.wakeLock.request('screen');
+        }
+      } catch (_) {}
+    }
+
+    async function setupStream(stream) {
+      if (animId) cancelAnimationFrame(animId);
+      if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+      if (audioCtx) await audioCtx.close();
+
+      currentStream = stream;
+      stream.getVideoTracks().forEach(track => track.stop());
+
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.78;
+      source.connect(analyser);
+
+      dataArray = new Uint8Array(analyser.frequencyBinCount);
+      keepScreenAwake();
+      showUI();
+      animate();
+    }
+
+    async function startMic() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+        });
+        setupStream(stream);
+      } catch (err) {
+        alert("Microphone access denied: " + err.message);
+      }
+    }
+
+    async function startSystemAudio() {
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+        });
+        if (!stream.getAudioTracks().length) {
+          alert("No system audio detected! Please check 'Share system audio' in the popup.");
+          return;
+        }
+        setupStream(stream);
+      } catch (err) {
+        console.log("Capture cancelled:", err);
+      }
+    }
+
+    function toggleFull() {
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+      else document.exitFullscreen();
+    }
+
+    // Automatically extracts N bands (8 to 32) depending on window width
+    function getDynamicBands(freqData, count) {
+      const bands = new Array(count).fill(0);
+      const minBin = 1;
+      const maxBin = 65;
+      let framePeak = 1;
+
+      for (let i = 0; i < count; i++) {
+        const startRatio = Math.pow(i / count, 1.35);
+        const endRatio = Math.pow((i + 1) / count, 1.35);
+        const startBin = Math.floor(minBin + startRatio * (maxBin - minBin));
+        const endBin = Math.max(startBin + 1, Math.floor(minBin + endRatio * (maxBin - minBin)));
+
+        let sum = 0;
+        for (let b = startBin; b < endBin; b++) sum += freqData[b] || 0;
+        const trebleBoost = 1 + (i / count) * 0.45;
+        const rawVal = (sum / (endBin - startBin)) * trebleBoost;
+        bands[i] = rawVal;
+        if (rawVal > framePeak) framePeak = rawVal;
+      }
+
+      rollingMax = Math.max(framePeak, rollingMax * 0.992, 95);
+      return bands.map(v => Math.min(255, ((v / rollingMax) * 245) * sensitivity));
+    }
+
+    function getBarColor(theme, dynamicHue, barIndex, totalBars, heightRatio) {
+      if (theme === 'Cyber Neon') {
+        const neonHue = 185 + (barIndex / totalBars) * 130;
+        return `hsla(${neonHue}, 100%, 60%, 0.95)`;
+      }
+      if (theme === 'Classic VU Meter') {
+        if (heightRatio > 0.76) return 'hsla(0, 100%, 58%, 0.95)';
+        if (heightRatio > 0.50) return 'hsla(48, 100%, 55%, 0.95)';
+        return 'hsla(135, 95%, 50%, 0.95)';
+      }
+      if (theme === 'Bass Strobe / Ambient') {
+        const pulseHue = (dynamicHue + heightRatio * 35) % 360;
+        const lum = 45 + strobeFlash * 35;
+        return `hsla(${pulseHue}, 100%, ${lum}%, 0.92)`;
+      }
+      return `hsla(${(dynamicHue + (barIndex / totalBars) * 280) % 360}, 100%, 62%, 0.92)`;
+    }
+
+    function animate() {
+      animId = requestAnimationFrame(animate);
+      analyser.getByteFrequencyData(dataArray);
+
+      const barCount = activeBarCount;
+      const bands = getDynamicBands(dataArray, barCount);
+
+      const bassEnd = Math.max(2, Math.floor(barCount * 0.25));
+      const highStart = Math.floor(barCount * 0.65);
+      const bass = bands.slice(0, bassEnd).reduce((a, b) => a + b, 0) / bassEnd;
+      const high = bands.slice(highStart).reduce((a, b) => a + b, 0) / Math.max(1, barCount - highStart);
+
+      if (bass - prevBass > 28 && bass > 120) {
+        strobeFlash = 1.0;
+      } else {
+        strobeFlash *= 0.86;
+      }
+      prevBass = bass;
+
+      const theme = themes[themeIndex];
+      const dynamicHue = Math.round((bass * 1.5 + high * 2.0) % 360);
+
+      let glowHue = dynamicHue;
+      let baseInner = Math.min(48, Math.max(5, Math.round((bass / 255) * 44)));
+      let baseOuter = Math.max(2, Math.round(baseInner * 0.25));
+      let spread = templateStyle === 'ambient' ? '92%' : '76%';
+
+      if (theme === 'Cyber Neon') glowHue = 285;
+      else if (theme === 'Classic VU Meter') glowHue = bass > 195 ? 5 : bass > 130 ? 48 : 135;
+      else if (theme === 'Bass Strobe / Ambient') {
+        baseInner = Math.min(68, Math.round(10 + (bass / 255) * 35 + strobeFlash * 32));
+        baseOuter = Math.min(28, Math.round(4 + strobeFlash * 22));
+        spread = '95%';
+      }
+
+      const innerLight = Math.min(72, Math.round(baseInner * glowBrightness));
+      const outerLight = Math.min(35, Math.round(baseOuter * glowBrightness));
+
+      const bgStyle = glowBrightness <= 0.05
+        ? '#040406'
+        : `radial-gradient(circle at 50% 100%, hsl(${glowHue}, 95%, ${innerLight}%) 0%, hsl(${(glowHue + 25) % 360}, 85%, ${outerLight}%) 52%, #040406 ${spread})`;
+
+      document.body.style.background = bgStyle;
+      if (window._pipBody) window._pipBody.style.background = bgStyle;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (templateStyle === 'ambient') return;
+
+      const totalSlot = canvas.width / barCount;
+      const barWidth = totalSlot * 0.68;
+      const gap = totalSlot * 0.32;
+      // Scale LED block height slightly smaller when window height is compact
+      const segmentHeight = canvas.height < 260 ? 6 : 10;
+      const segmentGap = canvas.height < 260 ? 3 : 4;
+      const midPoint = (barCount - 1) / 2;
+
+      for (let i = 0; i < barCount; i++) {
+        const bandIndex = mirrorMode ? Math.abs(i - midPoint) * 1.85 : i;
+        const val = bands[Math.min(barCount - 1, Math.floor(bandIndex))] / 255;
+        const totalBarHeight = val * canvas.height * 0.9;
+
+        if (totalBarHeight >= peaks[i]) {
+          peaks[i] = totalBarHeight;
+          peakHoldTimers[i] = 16;
+        } else if (peakHoldTimers[i] > 0) {
+          peakHoldTimers[i]--;
+        } else {
+          peaks[i] = Math.max(0, peaks[i] - 3.5);
+        }
+
+        const x = i * totalSlot + gap / 2;
+
+        if (templateStyle === 'solid') {
+          const color = getBarColor(theme, dynamicHue, i, barCount, val);
+          ctx.fillStyle = color;
+          ctx.shadowColor = color;
+          ctx.shadowBlur = 14;
+          ctx.beginPath();
+          ctx.roundRect(x, canvas.height - totalBarHeight, barWidth, totalBarHeight, [6, 6, 0, 0]);
+          ctx.fill();
+        } else {
+          for (let yOffset = 0; yOffset < totalBarHeight; yOffset += segmentHeight + segmentGap) {
+            const y = canvas.height - yOffset - segmentHeight;
+            const heightRatio = yOffset / (canvas.height * 0.9);
+            const color = getBarColor(theme, dynamicHue, i, barCount, heightRatio);
+
+            ctx.fillStyle = color;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 10;
+            ctx.beginPath();
+            ctx.roundRect(x, y, barWidth, segmentHeight, 2);
+            ctx.fill();
+          }
+        }
+
+        if (peaks[i] > 5) {
+          const capY = canvas.height - peaks[i] - segmentHeight;
+          ctx.fillStyle = '#ffffff';
+          ctx.shadowColor = '#ffffff';
+          ctx.shadowBlur = 12;
+          ctx.beginPath();
+          ctx.roundRect(x, capY, barWidth, 4, 2);
+          ctx.fill();
+        }
+      }
+      ctx.shadowBlur = 0;
+    }
+  </script>
+</body>
+</html>
